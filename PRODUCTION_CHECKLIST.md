@@ -150,6 +150,7 @@
 - [ ] **Environment Variables**:
   - `STAGING_BUCKET`: Name of staging S3 bucket
   - `KB_SOURCE_BUCKET`: Name of kb-source S3 bucket
+  - `KB_SOURCE_REGION`: Optional region of `KB_SOURCE_BUCKET` (e.g. `eu-central-1` Frankfurt). Required if `kb-source` is in a different region than Lambda.
   - `REGISTRY_TABLE_NAME`: `content-registry`
   - `BLOCKLIST_TABLE_NAME`: Optional DynamoDB table name (e.g. `url-blocklist`, PK: `url` String) holding exact URLs to block
   - `CURATION_ALLOW_PATTERNS`: Optional comma-separated regexes defining allowed banking sections (e.g. `/personal-banking,/loans,/cards,/deposits,/rates,/faqs`)
@@ -164,6 +165,8 @@
   - `STATE_TABLE_NAME`: `pipeline-state`
   - `REGISTRY_TABLE_NAME`: `content-registry`
   - `KB_SOURCE_BUCKET`: Name of kb-source S3 bucket
+  - `KB_SOURCE_REGION`: Optional region of `KB_SOURCE_BUCKET` (e.g. `eu-central-1` Frankfurt).
+  - `BEDROCK_REGION`: Optional region of Bedrock Knowledge Base (e.g. `eu-central-1` Frankfurt; defaults to `KB_SOURCE_REGION`).
   - `KNOWLEDGE_BASE_ID`: Bedrock Knowledge Base ID
   - `DATA_SOURCE_ID`: Bedrock Knowledge Base Data Source ID
   - `REQUIRED_EMPTY_CHECKS`: `2`

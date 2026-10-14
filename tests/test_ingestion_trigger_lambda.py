@@ -23,6 +23,7 @@ class TestIngestionTriggerLambda(unittest.TestCase):
 
         ingestion_trigger_lambda.sqs = self.mock_sqs
         ingestion_trigger_lambda.s3 = self.mock_s3
+        ingestion_trigger_lambda.s3_kb = self.mock_s3
         ingestion_trigger_lambda.state_table = self.mock_state_table
         ingestion_trigger_lambda.registry_table = self.mock_registry_table
         ingestion_trigger_lambda.bedrock_agent = self.mock_bedrock_agent

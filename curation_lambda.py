@@ -28,6 +28,8 @@ Required environment variables:
   KB_SOURCE_BUCKET      - the bucket Bedrock's data source points at
   REGISTRY_TABLE_NAME  - the content registry
 Optional:
+  KB_SOURCE_REGION          - AWS region of KB_SOURCE_BUCKET (e.g. "eu-central-1").
+                              If omitted, defaults to the Lambda's configured region.
   BLOCKLIST_TABLE_NAME      - optional DynamoDB table (PK: url String) holding exact
                               full URLs to block from curation.
   CURATION_ALLOW_PATTERNS   - comma-separated regex patterns defining allowed
@@ -63,7 +65,10 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger()
 logger.setLevel(LOG_LEVEL)
 
+KB_SOURCE_REGION = os.environ.get("KB_SOURCE_REGION")
+
 s3 = boto3.client("s3")
+s3_kb = boto3.client("s3", region_name=KB_SOURCE_REGION) if KB_SOURCE_REGION else s3
 dynamodb = boto3.resource("dynamodb")
 
 STAGING_BUCKET = os.environ["STAGING_BUCKET"]
@@ -225,20 +230,39 @@ def process_metadata_object(bucket, metadata_key):
         logger.info("Rejected (CURATION_EXCLUDE_PATTERNS match): url=%s urlHash=%s", source_url, url_hash)
         return
 
-    # Copy both files as-is -- same key, different bucket. CopyObject
-    # needs s3:GetObject on the staging bucket and s3:PutObject on
-    # kb-source in this Lambda's role.
-    s3.copy_object(
-        Bucket=KB_SOURCE_BUCKET, Key=content_key,
-        CopySource={"Bucket": bucket, "Key": content_key},
-    )
-    s3.copy_object(
-        Bucket=KB_SOURCE_BUCKET, Key=metadata_key,
-        CopySource={"Bucket": bucket, "Key": metadata_key},
-    )
+    # Transfer both files as-is -- same key, different bucket/region.
+    # Uses destination regional S3 client (s3_kb) with automatic fallback to
+    # stream transfer (get_object -> put_object) if server-side copy_object fails
+    # due to cross-region routing, SigV4 regional mismatch, or VPC Gateway endpoint blocks.
+    def transfer_to_kb(key, content_type):
+        try:
+            s3_kb.copy_object(
+                Bucket=KB_SOURCE_BUCKET,
+                Key=key,
+                CopySource={"Bucket": bucket, "Key": key},
+            )
+        except Exception as copy_err:
+            logger.info(
+                "Cross-region copy_object failed (%s); streaming object directly to s3://%s/%s (region=%s)...",
+                copy_err, KB_SOURCE_BUCKET, key, KB_SOURCE_REGION or "default"
+            )
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            body = obj["Body"].read()
+            s3_kb.put_object(
+                Bucket=KB_SOURCE_BUCKET,
+                Key=key,
+                Body=body,
+                ContentType=content_type,
+            )
+
+    transfer_to_kb(content_key, "text/plain")
+    transfer_to_kb(metadata_key, "application/json")
 
     mark_approved(url_hash, content_key)
-    logger.info("Approved: url=%s urlHash=%s -> s3://%s/%s", source_url, url_hash, KB_SOURCE_BUCKET, content_key)
+    logger.info(
+        "Approved: url=%s urlHash=%s -> s3://%s/%s (region=%s)",
+        source_url, url_hash, KB_SOURCE_BUCKET, content_key, KB_SOURCE_REGION or "default"
+    )
 
 
 def handler(event, context):

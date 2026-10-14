@@ -21,6 +21,7 @@ class TestCurationLambda(unittest.TestCase):
         self.mock_blocklist_table = MagicMock()
 
         curation_lambda.s3 = self.mock_s3
+        curation_lambda.s3_kb = self.mock_s3
         curation_lambda.registry_table = self.mock_registry_table
         curation_lambda.blocklist_table = self.mock_blocklist_table
 
@@ -185,6 +186,52 @@ class TestCurationLambda(unittest.TestCase):
             db_call = self.mock_registry_table.update_item.call_args[1]
             self.assertEqual(db_call["ExpressionAttributeValues"][":approved"], "APPROVED")
             self.assertEqual(db_call["ExpressionAttributeValues"][":key"], "processed/hash-approved.txt")
+
+    def test_process_metadata_cross_region_fallback_to_stream(self):
+        """Verify fallback to direct get_object + put_object when copy_object fails across regions."""
+        metadata = {
+            "metadataAttributes": {
+                "sourceUrl": "https://bank.com/personal-banking/loans",
+                "urlHash": "hash-cross-region",
+            }
+        }
+        mock_body_meta = MagicMock(read=MagicMock(return_value=json.dumps(metadata).encode("utf-8")))
+        mock_body_text = MagicMock(read=MagicMock(return_value=b"Loan terms content"))
+
+        def fake_get_object(Bucket, Key):
+            if Key.endswith(".metadata.json"):
+                return {"Body": mock_body_meta}
+            return {"Body": mock_body_text}
+
+        self.mock_s3.get_object.side_effect = fake_get_object
+        self.mock_registry_table.get_item.return_value = {
+            "Item": {"status": "PROCESSED", "ingestionEnabled": "true"}
+        }
+        self.mock_blocklist_table.get_item.return_value = {}
+
+        # Simulate copy_object failing (e.g. AccessDenied across regions)
+        self.mock_s3.copy_object.side_effect = RuntimeError("AccessDenied: cross-region VPC limitation")
+
+        with patch.object(
+            curation_lambda, "CURATION_ALLOW_PATTERNS", []
+        ), patch.object(
+            curation_lambda, "EXCLUDE_PATTERNS", []
+        ):
+            curation_lambda.process_metadata_object(
+                "test-staging-bucket", "processed/hash-cross-region.txt.metadata.json"
+            )
+
+            # put_object should be called twice (for .txt and .metadata.json) as fallback
+            self.assertEqual(self.mock_s3.put_object.call_count, 2)
+            put_calls = self.mock_s3.put_object.call_args_list
+            keys_put = [call[1]["Key"] for call in put_calls]
+            self.assertIn("processed/hash-cross-region.txt", keys_put)
+            self.assertIn("processed/hash-cross-region.txt.metadata.json", keys_put)
+
+            # Status should still be approved
+            self.mock_registry_table.update_item.assert_called_once()
+            db_call = self.mock_registry_table.update_item.call_args[1]
+            self.assertEqual(db_call["ExpressionAttributeValues"][":approved"], "APPROVED")
 
     def test_handler_records_batch_failures(self):
         """Verify partial failure reporting in SQS handler."""

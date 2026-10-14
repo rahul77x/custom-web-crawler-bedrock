@@ -17,9 +17,11 @@ Required environment variables:
   REGISTRY_TABLE_NAME        - the content registry the crawler Lambda writes to
   KB_SOURCE_BUCKET           - the S3 bucket Bedrock's data source points at
   KNOWLEDGE_BASE_ID          - Bedrock knowledge base ID
-  DATA_SOURCE_ID             - Bedrock knowledge base data source ID
 Optional:
-  REQUIRED_EMPTY_CHECKS      - default 2
+  KB_SOURCE_REGION             - AWS region of KB_SOURCE_BUCKET (e.g. "eu-central-1")
+  BEDROCK_REGION               - AWS region of Bedrock Knowledge Base (e.g. "eu-central-1",
+                                 defaults to KB_SOURCE_REGION if set)
+  REQUIRED_EMPTY_CHECKS        - default 2
   MIN_HOURS_BETWEEN_INGESTIONS - default 6 (guards against re-firing all day)
 """
 
@@ -34,10 +36,18 @@ LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger()
 logger.setLevel(LOG_LEVEL)
 
+KB_SOURCE_REGION = os.environ.get("KB_SOURCE_REGION")
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION", KB_SOURCE_REGION)
+
 sqs = boto3.client("sqs")
 s3 = boto3.client("s3")
+s3_kb = boto3.client("s3", region_name=KB_SOURCE_REGION) if KB_SOURCE_REGION else s3
 dynamodb = boto3.resource("dynamodb")
-bedrock_agent = boto3.client("bedrock-agent")
+bedrock_agent = (
+    boto3.client("bedrock-agent", region_name=BEDROCK_REGION)
+    if BEDROCK_REGION
+    else boto3.client("bedrock-agent")
+)
 
 QUEUE_URLS = [u.strip() for u in os.environ["MONITORED_QUEUE_URLS"].split(",")]
 STATE_TABLE = os.environ["STATE_TABLE_NAME"]
@@ -128,8 +138,8 @@ def mark_deleted(item):
         metadata_key = f"{curated_key}.metadata.json"
         for key_to_del in (curated_key, metadata_key):
             try:
-                s3.delete_object(Bucket=KB_SOURCE_BUCKET, Key=key_to_del)
-                logger.info("Deleted stale S3 object from kb-source: %s", key_to_del)
+                s3_kb.delete_object(Bucket=KB_SOURCE_BUCKET, Key=key_to_del)
+                logger.info("Deleted stale S3 object from kb-source: %s (region=%s)", key_to_del, KB_SOURCE_REGION or "default")
             except ClientError as e:
                 logger.error("Could not delete %s from KB-source bucket: %s", key_to_del, e, exc_info=True)
 
