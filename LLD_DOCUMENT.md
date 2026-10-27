@@ -1,6 +1,6 @@
 # Low-Level Design (LLD): Custom Web Crawler to Amazon Bedrock Knowledge Base & Amazon Connect AI Agent
 
-**Document Version:** 2.0  
+**Document Version:** 2.1  
 **Status:** Approved / Production-Ready  
 **Target Platform:** Amazon Web Services (AWS)  
 **Author:** Engineering Team  
@@ -12,10 +12,10 @@
 
 This Low-Level Design (LLD) document details the architecture, component specifications, data schemas, algorithmic logic, and integration patterns for an enterprise-grade web content crawler and generative RAG (Retrieval-Augmented Generation) pipeline.
 
-The solution automatically discovers, crawls, sanitizes, curates, and synchronizes authoritative banking website content into **Amazon Bedrock Knowledge Bases**. The synchronized knowledge is subsequently served in real-time to customers and contact center agents through **Amazon Connect AI Agents** across voice and digital channels (Web Chat, Mobile App, WhatsApp).
+The solution automatically discovers, crawls, sanitizes, curates, and synchronizes authoritative banking website content into **Amazon Bedrock Knowledge Bases**. The synchronized knowledge is subsequently served in real-time to website visitors through an **Amazon Connect AI Agent** powering an interactive, text-based **Web Chat Widget** embedded on the bank's digital portals.
 
 ### Primary Objectives
-1. **Accurate, Grounded Self-Service**: Enable the Amazon Connect AI Agent to answer customer queries (fixed deposit rates, loan criteria, service charges, digital banking guidelines) with zero hallucinations, backed by verifiable `sourceUrl` citations.
+1. **Accurate, Grounded Digital Self-Service**: Enable the text-based Amazon Connect AI Agent to answer customer queries (fixed deposit rates, mortgage eligibility, fee matrices, online banking instructions) with zero hallucinations, backed by verifiable, clickable `sourceUrl` citations.
 2. **Financial Table Integrity**: Preserve tabular data relationships (interest rate slabs, tenure matrix) via HTML-to-Markdown conversion so Bedrock semantic chunking retains table structures intact.
 3. **Multi-Stage Defense-in-Depth Curation & Scoping**:
    * **Domain & Host Governance**: Multi-host discovery via `crawl-sources` DynamoDB table; unvetted subdomains discovered on the site are registered as disabled candidates for human review.
@@ -25,7 +25,7 @@ The solution automatically discovers, crawls, sanitizes, curates, and synchroniz
    * Stale/deleted URLs are excluded at queueing time by generation filtering (`lastSeenGeneration = generation`).
    * A 30% drop sanity check and completeness guard prevent incomplete discovery passes from accidentally triggering Knowledge Base deletions.
    * Deleted URLs that reappear on the bank's site are automatically revived to `DISCOVERED` with cleared content hashes.
-5. **Seamless Omnichannel Integration**: Integrate with Amazon Connect using Amazon Q in Connect and native Bedrock `RetrieveAndGenerate` APIs within Amazon Connect Contact Flows.
+5. **Native Amazon Connect AI Agent Integration**: Seamless integration with **Amazon Q in Connect** using native intent resolution and **Amazon Nova Pro** for response generation, with Bedrock Guardrails configured directly on the Amazon Connect AI Agent.
 
 ---
 
@@ -36,7 +36,7 @@ flowchart TD
     subgraph INGESTION["1. Ingestion Pipeline (AWS Serverless)"]
         direction TB
         SOURCES[("DynamoDB crawl-sources<br/>(Approved hosts, aliases, candidate subdomains)")]
-        EB1["EventBridge Scheduler<br/>(Nightly Discovery Cron)"] --> L1["Discovery Lambda"]
+        EB1["EventBridge Scheduler<br/>(Discovery Cron)"] --> L1["Discovery Lambda"]
         SOURCES <--> L1
         L1 -- "Async Invoke {'generation': N}" --> L2["Queueing Lambda"]
         L2 --> Q1[("SQS crawl-queue")]
@@ -50,7 +50,7 @@ flowchart TD
         Q3 --> L5["Curation Lambda"]
         L5 --> S3_KB[("S3 kb-source-bucket<br/>(Curated text + sidecars)")]
         
-        EB2["EventBridge Scheduler<br/>(Every 10-15 Min)"] --> L6["Ingestion-Trigger Lambda"]
+        EB2["EventBridge Scheduler<br/>(Quiescence Poll)"] --> L6["Ingestion-Trigger Lambda"]
         L6 -- Monitor Depths --> Q1 & Q2 & Q3
         L6 -- Reconcile Deletions --> S3_KB
         L6 -- StartIngestionJob --> BEDROCK_SYNC["Amazon Bedrock<br/>Data Source Sync Job"]
@@ -60,17 +60,17 @@ flowchart TD
         direction TB
         BEDROCK_SYNC --> AOSS[("OpenSearch Serverless<br/>Vector Store (1536-dim)")]
         TITAN["Amazon Titan Embeddings V2<br/>(text-to-vector)"] <--> AOSS
-        GUARDRAILS["Bedrock Guardrails<br/>(PII Redaction & Prompt Injection Filter)"]
     end
 
-    subgraph CONNECT["3. Contact Center Runtime (Amazon Connect)"]
+    subgraph CONNECT["3. Contact Center Runtime (Amazon Connect Web Chat)"]
         direction TB
-        CUSTOMER(["Customer<br/>(Voice / Web Chat / Mobile)"]) <--> FLOW["Amazon Connect<br/>Contact Flow"]
-        FLOW <--> LEX["Amazon Lex V2 /<br/>Connect Speech Recognition"]
-        FLOW <--> RAG_CALL["Bedrock RetrieveAndGenerate API<br/>or Amazon Q in Connect"]
-        RAG_CALL <--> GUARDRAILS
-        RAG_CALL <--> AOSS
-        FLOW <--> AGENT(["Contact Center Agent<br/>(Connect Agent Workspace)"])
+        USER(["Website Visitor<br/>(Digital Banking Portal)"]) <--> WIDGET["Amazon Connect<br/>Web Chat Widget"]
+        WIDGET <--> FLOW["Amazon Connect<br/>Contact Flow"]
+        FLOW <--> Q_CONNECT["Amazon Q in Connect<br/>(Customer Assistant AI Agent)"]
+        Q_CONNECT <--> GUARDRAILS["Amazon Bedrock Guardrail<br/>(Configured on Connect AI Agent)"]
+        Q_CONNECT <--> AOSS
+        Q_CONNECT <--> NOVA["Amazon Nova Pro<br/>(amazon.nova-pro-v1:0)"]
+        FLOW -- Escalation / Low Confidence --> AGENT(["Live Contact Center Agent<br/>(Connect Agent Workspace)"])
     end
 ```
 
@@ -190,7 +190,7 @@ sequenceDiagram
     participant IT as Ingestion-Trigger Lambda
     participant B as Bedrock KB
 
-    EB->>D: Trigger nightly discovery (generation = N)
+    EB->>D: Trigger discovery run (generation = N)
     D->>CS: Load approved hosts, aliases & scan root page for candidate hosts
     D->>D: Resolve sitemaps (.xml or .xml.gz) & evaluate RFC 9309 robots.txt
     D->>D: Sanity Guard: Check URL count vs lastGoodUrlCount (<=30% drop)
@@ -232,7 +232,7 @@ sequenceDiagram
         U-->>U: Raise exception (SQS visibility retry)
     end
     
-    loop Every 10-15 Min
+    loop Every 5-15 Min
         EB->>IT: Run quiescence check
         IT->>IT: Check depths across 3 queues
         alt 2 Consecutive 0-Depth Checks & Cooldown Passed
@@ -245,7 +245,7 @@ sequenceDiagram
 ---
 
 ### 4.1. Discovery Lambda (`discovery_lambda.py`)
-* **Trigger**: EventBridge Scheduler (Nightly, e.g., `cron(0 1 * * ? *)`).
+* **Trigger**: EventBridge Scheduler (Configurable: Hourly or Nightly).
 * **Memory & Timeout**: 1024 MB, 15 minutes.
 * **Environment Variables**:
   * `STATE_TABLE_NAME` *(Required)*: DynamoDB pipeline-state table.
@@ -384,13 +384,13 @@ sequenceDiagram
 ---
 
 ### 4.6. Ingestion-Trigger Lambda (`ingestion_trigger_lambda.py`)
-* **Trigger**: EventBridge Scheduler (rate: every 10–15 minutes).
+* **Trigger**: EventBridge Scheduler (rate: every 5–15 minutes).
 * **Environment Variables**:
   * `MONITORED_QUEUE_URLS` *(Required)*: Comma-separated queue URLs (`crawl-queue`, `processing-queue`, `curation-queue`).
   * `STATE_TABLE_NAME`, `REGISTRY_TABLE_NAME`, `KB_SOURCE_BUCKET`, `KNOWLEDGE_BASE_ID`, `DATA_SOURCE_ID` *(Required)*.
   * `KB_SOURCE_REGION`, `BEDROCK_REGION` *(Optional)*: Regional endpoints for cross-region Bedrock/S3.
   * `REQUIRED_EMPTY_CHECKS` *(Optional, default 2)*: Consecutive 0-depth polls.
-  * `MIN_HOURS_BETWEEN_INGESTIONS` *(Optional, default 6)*: Minimum cooldown window.
+  * `MIN_HOURS_BETWEEN_INGESTIONS` *(Optional, default 1.0 or 6.0)*: Minimum cooldown window.
 * **Key Algorithmic Steps**:
   1. Inspect status of previous Bedrock ingestion job via `bedrock_agent.list_ingestion_jobs`; alert if `FAILED`.
   2. Inspect `pipelineStatus` in `pipeline-state`: if `DISCOVERING` or `QUEUEING`, exit immediately (unless running $>3$ hours).
@@ -412,9 +412,10 @@ sequenceDiagram
 ### 5.1. Vector Store & Embedding Model
 * **Vector Database**: Amazon OpenSearch Serverless (AOSS) Collection (Vector Search type).
 * **Vector Index Configuration**:
-  * Dimension: 1536 (or 1024 depending on model configuration).
+  * Dimension: 1536.
   * Metric: Cosine Similarity / HNSW (Hierarchical Navigable Small World).
 * **Embedding Model**: `amazon.titan-embed-text-v2` (supports normalized vector embeddings and multilingual text).
+* **Response Generation Foundation Model**: **Amazon Nova Pro** (`amazon.nova-pro-v1:0`), offering state-of-the-art accuracy, speed, reasoning, and cost efficiency for financial knowledge retrieval.
 
 ### 5.2. Chunking Strategy for Preserved Markdown
 * **Chunking Type**: Hierarchical Chunking or Semantic Chunking.
@@ -433,114 +434,91 @@ When Bedrock indexes `processed/{urlHash}.txt`, it automatically reads `processe
   }
 }
 ```
-* **Filterable Attributes**: In Amazon Connect or Bedrock API calls, queries can restrict search space using metadata filters (e.g., `sourceUrl` prefix or `pageTitle`).
+* **Filterable Attributes**: In Amazon Connect or Bedrock queries, the search space can be dynamically filtered using metadata attributes (e.g., `sourceUrl` prefix or `pageTitle`).
 
-### 5.4. Amazon Bedrock Guardrails
-* **Content Filters**: High threshold on Hate, Insults, Sexual, Violence.
-* **Prompt Injection Defense**: Filters adversarial prompt injections embedded in public web pages.
-* **Sensitive Information (PII) Redaction**: Automatically masks PAN numbers, credit card numbers, IBANs, and phone numbers in synthesized responses.
-* **Contextual Grounding Filter**: Rejects model output if grounding score against retrieved chunks is below 0.75 (prevents ungrounded answers).
+### 5.4. Amazon Bedrock Guardrail Enforcement
+To strictly satisfy banking compliance, **Amazon Bedrock Guardrails are applied directly on the Amazon Connect AI Agent side** (see Section 6).
+* **Input Filters**: Detect and block prompt injections, jailbreaks, and adversarial input attempts before Bedrock is queried.
+* **PII Redaction**: Automatically detects and masks sensitive identifiers (PAN numbers, credit card numbers, IBANs, national identity numbers, and contact numbers) from the generated answer before rendering in the chat widget.
+* **Contextual Grounding Filter**: Automatically validates the generated answer against retrieved reference chunks. If the confidence score is below 0.75, the answer is suppressed and routed to human agent escalation.
 
 ---
 
 ## 6. Amazon Connect AI Agent Integration Architecture
 
+The solution uses a **100% text-based Web Chatbot** embedded into the bank's digital website portals. It utilizes **native Amazon Q in Connect Intent & AI Agent** integration within Amazon Connect Contact Flows—**completely eliminating custom API middleware or `RetrieveAndGenerate` Lambda orchestration**.
+
 ```mermaid
-flowchart LR
-    subgraph CHANNELS["Inbound Channels"]
-        VOICE["PSTN Voice Call"]
-        CHAT["Web Chat / Mobile App"]
+flowchart TD
+    subgraph WEB["Digital Channel (Web Portal)"]
+        VISITOR(["Customer / Website Visitor"]) <--> WIDGET["Amazon Connect Web Chat Widget<br/>(Embedded JavaScript SDK)"]
     end
 
-    subgraph CONNECT_CORE["Amazon Connect Contact Flow"]
-        ENTRY["Customer Inbound Entry"]
-        AUTH["Customer Verification / IVR"]
-        ROUTER{"Route to AI Agent?"}
-        AI_BLOCK["Amazon Q in Connect /<br/>Bedrock RetrieveAndGenerate"]
-        AGENT_QUEUE["Transfer to Human Agent Queue"]
+    subgraph CONNECT["Amazon Connect Runtime"]
+        WIDGET <--> FLOW["Amazon Connect Contact Flow<br/>(Chat Messaging Session)"]
+        FLOW <--> Q_BLOCK["Q in Connect Intent Block<br/>(Check / Use Q in Connect)"]
+        FLOW -- "Escalation / Human Request" --> AGENT_QUEUE["Human Specialist Queue<br/>(Connect Agent Workspace)"]
     end
 
-    subgraph BEDROCK_RAG["Bedrock Generative AI"]
-        KB["Bedrock Knowledge Base<br/>(Authoritative Bank Data)"]
-        FM["Claude 3.5 Sonnet / Haiku<br/>(Generative Response)"]
-        GUARD["Bedrock Guardrails<br/>(Grounding & Compliance)"]
+    subgraph Q_AGENT["Amazon Q in Connect (AI Agent Layer)"]
+        Q_BLOCK <--> AI_AGENT["Customer Assistant AI Agent<br/>(Amazon Q in Connect)"]
+        AI_AGENT <--> GUARD["Amazon Bedrock Guardrail<br/>(Configured on Connect AI Agent)<br/>- PII Redaction & Content Filter<br/>- Grounding & Prompt Injection Check"]
     end
 
-    VOICE & CHAT --> ENTRY --> AUTH --> ROUTER
-    ROUTER -- Yes --> AI_BLOCK
-    ROUTER -- No / Escalation --> AGENT_QUEUE
-    AI_BLOCK <--> KB & FM & GUARD
-    AI_BLOCK -- Unresolved / Low Confidence --> AGENT_QUEUE
+    subgraph BEDROCK_AI["Amazon Bedrock Foundation Services"]
+        AI_AGENT -- "Semantic Retrieval" --> KB["Amazon Bedrock Knowledge Base<br/>(Curated Banking Documents)"]
+        AI_AGENT -- "Synthesize Response with Citations" --> NOVA["Amazon Nova Pro<br/>(amazon.nova-pro-v1:0)"]
+    end
 ```
 
-### 6.1. Integration Pattern A: Amazon Q in Connect (Native AI Agent Assistant)
-* Create an Amazon Q in Connect Assistant (`aiAgent`).
-* Associate Bedrock Knowledge Base ARN directly:
-  ```bash
-  aws qconnect create-content-association \
-    --assistant-id <connect-assistant-id> \
-    --association-type BEDROCK_KNOWLEDGE_BASE \
-    --association '{"bedrockKnowledgeBase": {"knowledgeBaseArn": "<bedrock-kb-arn>"}}'
-  ```
-* **Self-Service Mode**: Automated chat bot directly queries Knowledge Base and streams responses.
-* **Agent-Assist Mode**: During live voice calls, Contact Lens transcribes speech in real time, queries the Knowledge Base, and presents exact answer cards with verified citation links to human agents.
+### 6.1. Web Chat Integration Pattern
+1. **Frontend Embedding**:
+   * The bank's web portal embeds the **Amazon Connect In-App, Web, and Mobile Messaging JavaScript SDK** (Chat Widget).
+   * Website visitors click the chat widget icon, initiating an asynchronous encrypted WebSocket messaging session directly with Amazon Connect.
 
-### 6.2. Integration Pattern B: Direct Contact Flow via Bedrock `RetrieveAndGenerate` API
-Amazon Connect calls a lightweight Orchestrator Lambda or native Bedrock Contact Flow block.
+2. **Amazon Q in Connect Assistant Setup**:
+   * An Amazon Q in Connect Assistant is created and bound to the Amazon Connect Instance:
+     ```bash
+     aws qconnect create-assistant \
+       --name "banking-customer-ai-assistant" \
+       --type CUSTOMER_ASSISTANT
+     ```
+   * The Bedrock Knowledge Base is associated directly to the Assistant:
+     ```bash
+     aws qconnect create-content-association \
+       --assistant-id <connect-assistant-id> \
+       --association-type BEDROCK_KNOWLEDGE_BASE \
+       --association '{"bedrockKnowledgeBase": {"knowledgeBaseArn": "<bedrock-kb-arn>"}}'
+     ```
 
-```python
-import boto3
+3. **AI Agent Configuration with Amazon Nova Pro & Guardrails**:
+   * An AI Agent of type `CUSTOMER_ASSISTANT` is defined in Amazon Q in Connect:
+     ```json
+     {
+       "aiAgentType": "CUSTOMER_ASSISTANT",
+       "configuration": {
+         "customerAssistantAIAgentConfiguration": {
+           "knowledgeBaseAssociation": {
+             "knowledgeBaseId": "<bedrock-kb-id>"
+           },
+           "generationModelConfiguration": {
+             "modelArn": "arn:aws:bedrock:eu-central-1::foundation-model/amazon.nova-pro-v1:0"
+           },
+           "guardrailConfiguration": {
+             "guardrailId": "<bedrock-guardrail-id>",
+             "guardrailVersion": "1"
+           }
+         }
+       }
+     }
+     ```
+   * **Why on the Connect AI Agent side?** Configured directly on the AI Agent, the guardrail protects both the user query prompt *and* the synthesized output directly within Amazon Connect, preventing malicious input from reaching the models and guaranteeing that PII is masked before the payload returns to the chat widget.
 
-bedrock_runtime = boto3.client("bedrock-agent-runtime")
-
-def query_knowledge_base(customer_query, session_id=None):
-    request_params = {
-        "input": {"text": customer_query},
-        "retrieveAndGenerateConfiguration": {
-            "type": "KNOWLEDGE_BASE",
-            "knowledgeBaseConfiguration": {
-                "knowledgeBaseId": "KB_ID_FROM_INGESTION_TRIGGER",
-                "modelArn": "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
-                "generationConfiguration": {
-                    "promptTemplate": {
-                        "textPromptTemplate": (
-                            "You are a helpful customer service AI agent for the bank. "
-                            "Answer the customer's question strictly using the provided search results. "
-                            "If the search results do not contain the answer, say 'I apologize, but I do not "
-                            "have verified information on that topic. Let me connect you with a representative.' "
-                            "Never invent interest rates, penalty charges, or policy rules.\n\n"
-                            "Search Results:\n$search_results$\n\n"
-                            "Customer Question: $query$\n\nAnswer:"
-                        )
-                    },
-                    "guardrailConfiguration": {
-                        "guardrailId": "GUARDRAIL_ID",
-                        "guardrailVersion": "DRAFT"
-                    }
-                }
-            }
-        }
-    }
-    if session_id:
-        request_params["sessionId"] = session_id
-
-    response = bedrock_runtime.retrieve_and_generate(**request_params)
-    answer_text = response["output"]["text"]
-    citations = response.get("citations", [])
-    
-    sources = []
-    for c in citations:
-        for ref in c.get("retrievedReferences", []):
-            attrs = ref.get("metadata", {})
-            if "sourceUrl" in attrs:
-                sources.append(attrs["sourceUrl"])
-
-    return {
-        "answer": answer_text,
-        "sourceUrls": list(set(sources)),
-        "sessionId": response.get("sessionId")
-    }
-```
+4. **Contact Flow Orchestration**:
+   * When the customer submits a message in the widget, the Contact Flow routes the text through the native **"Check Q in Connect"** or **"Get customer input"** flow block.
+   * Q in Connect resolves the customer intent, searches the Bedrock Knowledge Base, executes the Guardrails, and synthesizes an authoritative answer using **Amazon Nova Pro**.
+   * The answer is streamed back as clean Markdown into the customer's chat widget, complete with clickable citations pointing back to the bank's official URLs.
+   * If the customer's query cannot be resolved, or if the customer types *"speak to agent"*, the Contact Flow executes the **Error / Escalation branch**, seamlessly transferring the chat session to a live human banking specialist in the **Amazon Connect Agent Workspace**.
 
 ---
 
@@ -548,13 +526,13 @@ def query_knowledge_base(customer_query, session_id=None):
 
 | Step # | Contact Flow Block | Execution Action | Fallback / Condition |
 | :---: | :--- | :--- | :--- |
-| **1** | **Set Voice & Logging** | Set text-to-speech engine to Amazon Polly Neural Voice. Turn on Contact Flow logging. | Next |
-| **2** | **Get Customer Input** | Prompt: *"How can I help you today?"* Captured via Amazon Lex V2 Intent or natural language speech input. | 3 invalid attempts $\rightarrow$ Transfer to Human Agent |
-| **3** | **Invoke AI Agent** | Passes customer utterance to Bedrock `RetrieveAndGenerate` API with session context. | Timeout ($> 3000\text{ms}$) $\rightarrow$ Step 7 |
-| **4** | **Evaluate Grounding** | Checks if Bedrock Guardrails intervened or if the response returned unverified notice. | Not grounded $\rightarrow$ Step 7 |
-| **5** | **Deliver Response** | **Voice**: Plays synthesized audio response.<br>**Chat**: Displays Markdown answer and appends verified citation links: `[Official Page](sourceUrl)`. | Next |
-| **6** | **Check Resolution** | Prompt: *"Did that answer your question?"* If Yes $\rightarrow$ Disconnect; If No $\rightarrow$ Step 7. | Customer dissatisfied $\rightarrow$ Step 7 |
-| **7** | **Transfer to Queue** | Set contact attributes (`lastCustomerIntent`, `bedrockQuery`, `aiResponseSnippet`). Transfer call to specialist queue with screen-pop for agent. | Queue Full $\rightarrow$ Voicemail / Callback |
+| **1** | **Initialize Chat & Logging** | Initialize chat session attributes. Enable Amazon Connect Contact Flow logging and CloudWatch Metrics. | Next |
+| **2** | **Display Welcome Prompt** | Send interactive greeting to the chat widget: *"Welcome to Bank Digital Assistant. How can I assist you with loans, accounts, or deposits today?"* | Timeout $\rightarrow$ Terminate |
+| **3** | **Check Q in Connect** | Customer message is evaluated via Amazon Q in Connect intent resolution against the associated `CUSTOMER_ASSISTANT` AI Agent. | No intent / unrecognized $\rightarrow$ Step 7 |
+| **4** | **Evaluate Guardrail & Synthesis** | Connect AI Agent validates query against **Bedrock Guardrail** $\rightarrow$ retrieves chunks from Bedrock KB $\rightarrow$ synthesizes answer using **Amazon Nova Pro** $\rightarrow$ verifies grounding $\ge 0.75$ and redacts PII. | Guardrail Violation / Ungrounded $\rightarrow$ Step 7 |
+| **5** | **Deliver Chat Response** | Streams formatted Markdown answer into the chat widget, appending verified citation pills: `[Official Page: https://www.bankofireland.com/...]`. | Next |
+| **6** | **Check Resolution** | Prompt quick-reply buttons in chat widget: *"Was this helpful? [Yes] [No - Need Agent]"*. If Yes $\rightarrow$ Loop to Step 3 for next question; If No $\rightarrow$ Step 7. | Customer requests agent $\rightarrow$ Step 7 |
+| **7** | **Transfer to Human Queue** | Attach contact attributes (`chatSummary`, `customerQuery`, `lastIntent`). Transfer the active chat session to `Digital-Banking-Support-Queue` with screen-pop for live agent. | Queue Full $\rightarrow$ Offer Call-Back / Message Form |
 
 ---
 
@@ -569,6 +547,7 @@ def query_knowledge_base(customer_query, session_id=None):
    * S3 Buckets: SSE-KMS with customer-managed keys (CMK) and bucket policies enforcing `aws:SecureTransport: true` (TLS 1.3).
    * DynamoDB: Encrypted at rest using AWS KMS.
    * OpenSearch Serverless: Enforced encryption at rest and in transit.
+   * Web Chat Session: End-to-end encrypted WebSockets (WSS) and TLS 1.3.
 3. **Data Residency & Cross-Region Support**:
    * Knowledge Base in `eu-central-1` (Frankfurt) or primary region; automatic regional client routing and streaming fallback in `curation_lambda` and `ingestion_trigger_lambda`.
 4. **Administrative Controls & Governance**:
@@ -584,10 +563,11 @@ def query_knowledge_base(customer_query, session_id=None):
 * **Incomplete Discovery Alarm**: Metric filter targeting `DISCOVERY_INCOMPLETE` or `DISCOVERY_HOST_FAILED`.
 * **Queueing Mismatch Alarm**: Metric filter targeting `QUEUEING_NO_MATCH` (warns if GSI projection is not `ALL`).
 * **Bedrock Ingestion Failure Alarm**: EventBridge rule on Bedrock Ingestion Job status `FAILED` targeting DevOps team.
+* **Chatbot Escalation Rate Alarm**: CloudWatch metric tracking high transfers from AI Agent to Live Agent queue.
 
 ### 9.2. Key CloudWatch Insights Queries
 
-#### Trace a Specific URL Across All Lambdas
+#### Trace a Specific URL Across All Ingestion Lambdas
 ```sql
 fields @timestamp, @logStream, @message
 | filter @message like /bankofireland.com\/personal-banking/ or @message like /e3b0c44298fc1c/

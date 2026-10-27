@@ -1,25 +1,20 @@
-flowchart LR
-    subgraph CHANNELS["Inbound Channels"]
-        VOICE["PSTN Voice Call"]
-        CHAT["Web Chat / Mobile App"]
+flowchart TD
+    subgraph WEB["Digital Channel (Web Portal)"]
+        VISITOR(["Customer / Website Visitor"]) <--> WIDGET["Amazon Connect Web Chat Widget<br/>(Embedded JavaScript SDK)"]
     end
 
-    subgraph CONNECT_CORE["Amazon Connect Contact Flow"]
-        ENTRY["Customer Inbound Entry"]
-        AUTH["Customer Verification / IVR"]
-        ROUTER{"Route to AI Agent?"}
-        AI_BLOCK["Amazon Q in Connect /<br/>Bedrock RetrieveAndGenerate"]
-        AGENT_QUEUE["Transfer to Human Agent Queue"]
+    subgraph CONNECT["Amazon Connect Runtime"]
+        WIDGET <--> FLOW["Amazon Connect Contact Flow<br/>(Chat Messaging Session)"]
+        FLOW <--> Q_BLOCK["Q in Connect Intent Block<br/>(Check / Use Q in Connect)"]
+        FLOW -- "Escalation / Human Request" --> AGENT_QUEUE["Human Specialist Queue<br/>(Connect Agent Workspace)"]
     end
 
-    subgraph BEDROCK_RAG["Bedrock Generative AI"]
-        KB["Bedrock Knowledge Base<br/>(Authoritative Bank Data)"]
-        FM["Claude 3.5 Sonnet / Haiku<br/>(Generative Response)"]
-        GUARD["Bedrock Guardrails<br/>(Grounding & Compliance)"]
+    subgraph Q_AGENT["Amazon Q in Connect (AI Agent Layer)"]
+        Q_BLOCK <--> AI_AGENT["Customer Assistant AI Agent<br/>(Amazon Q in Connect)"]
+        AI_AGENT <--> GUARD["Amazon Bedrock Guardrail<br/>(Configured on Connect AI Agent)<br/>- PII Redaction & Content Filter<br/>- Grounding & Prompt Injection Check"]
     end
 
-    VOICE & CHAT --> ENTRY --> AUTH --> ROUTER
-    ROUTER -- Yes --> AI_BLOCK
-    ROUTER -- No / Escalation --> AGENT_QUEUE
-    AI_BLOCK <--> KB & FM & GUARD
-    AI_BLOCK -- Unresolved / Low Confidence --> AGENT_QUEUE
+    subgraph BEDROCK_AI["Amazon Bedrock Foundation Services"]
+        AI_AGENT -- "Semantic Retrieval" --> KB["Amazon Bedrock Knowledge Base<br/>(Curated Banking Documents)"]
+        AI_AGENT -- "Synthesize Response with Citations" --> NOVA["Amazon Nova Pro<br/>(amazon.nova-pro-v1:0)"]
+    end
