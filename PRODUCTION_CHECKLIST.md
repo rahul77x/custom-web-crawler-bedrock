@@ -99,11 +99,14 @@
 - [ ] **Environment Variables**:
   - `STATE_TABLE_NAME`: `pipeline-state`
   - `REGISTRY_TABLE_NAME`: `content-registry`
+  - `SOURCES_TABLE_NAME`: `crawl-sources` (PK: `host` String)
   - `QUEUEING_LAMBDA_NAME`: Name or ARN of Queueing Lambda
-  - `SITEMAP_URL`: e.g. `https://<domain>/sitemap.xml` (or `SEED_BUCKET` / `SEED_KEY`)
+  - `ROOT_URL`: e.g. `https://www.bankofireland.com/` (bootstraps primary host and candidate discovery)
+  - `SITEMAP_URL`: Optional direct sitemap URL (or `SEED_BUCKET` / `SEED_KEY`)
   - `ALLOW_URL_PATTERNS`: Optional comma-separated regexes defining allowed banking sections (e.g. `/personal-banking,/loans,/cards,/deposits,/rates,/faqs`)
   - `EXCLUDE_URL_PATTERNS`: Optional comma-separated regexes
   - `BLOCKLIST_TABLE_NAME`: Optional DynamoDB table name (e.g. `url-blocklist`, PK: `url` String) holding exact URLs to block
+  - `MAX_URL_DROP_PERCENT`: Optional sanity threshold for drop guard (default `30`)
   - `UPSERT_CONCURRENCY`: `20`
   - `RESPECT_ROBOTS_TXT`: `true`
 
@@ -114,7 +117,7 @@
 - [ ] **Memory**: 512 MB
 - [ ] **Environment Variables**:
   - `REGISTRY_TABLE_NAME`: `content-registry`
-  - `CRAWL_ENABLED_INDEX_NAME`: `crawl-enabled-index`
+  - `CRAWL_ENABLED_INDEX_NAME`: `crawl-enabled-index` (GSI projection must be **`ALL`** or include `lastSeenGeneration`)
   - `CRAWL_QUEUE_URL`: URL of `crawl-queue`
   - `STATE_TABLE_NAME`: `pipeline-state`
 
@@ -128,6 +131,10 @@
 - [ ] **Environment Variables**:
   - `RAW_BUCKET`: Name of raw S3 bucket
   - `REGISTRY_TABLE_NAME`: `content-registry`
+  - `SOURCES_TABLE_NAME`: `crawl-sources` (PK: `host` String)
+  - `CRAWLER_USER_AGENT`: `internal-kb-crawler/1.0`
+  - `MAX_HTML_BYTES`: `5242880` (5 MB)
+  - `FETCH_TIMEOUT_SECONDS`: `15`
 
 ### Processing Lambda
 - [ ] **Trigger**: SQS `processing-queue` (Fed by S3 ObjectCreated on raw bucket: Prefix `raw/`, Suffix `.html`)

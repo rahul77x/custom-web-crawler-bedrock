@@ -7,6 +7,10 @@ __pycache__/
 # Local backups
 backup/
 backup copy/
+backup*/
+
+# Downloaded probe files
+robots_*.txt
 
 # Virtual environments
 .venv/

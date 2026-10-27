@@ -1,0 +1,66 @@
+sequenceDiagram
+    autonumber
+    actor EB as EventBridge Cron
+    participant D as Discovery Lambda
+    participant CS as DynamoDB crawl-sources
+    participant Q as Queueing Lambda
+    participant SQS1 as SQS crawl-queue
+    participant C as Crawler Lambda
+    participant S3R as S3 raw-bucket
+    participant P as Processing Lambda
+    participant S3S as S3 staging-bucket
+    participant U as Curation Lambda
+    participant S3K as S3 kb-source-bucket
+    participant IT as Ingestion-Trigger Lambda
+    participant B as Bedrock KB
+
+    EB->>D: Trigger nightly discovery (generation = N)
+    D->>CS: Load approved hosts, aliases & scan root page for candidate hosts
+    D->>D: Resolve sitemaps (.xml or .xml.gz) & evaluate RFC 9309 robots.txt
+    D->>D: Sanity Guard: Check URL count vs lastGoodUrlCount (<=30% drop)
+    alt Any Host Failed or URL Count Dropped
+        D->>D: Set complete = false (do NOT stamp lastDiscoveredGeneration)
+    else All Hosts Healthy
+        D->>D: Set complete = true & stamp lastDiscoveredGeneration = N
+    end
+    D->>D: Upsert candidate URLs (revive DELETED items -> DISCOVERED)
+    D->>Q: Async Invoke {"generation": N}
+    
+    Q->>Q: Query GSI crawlEnabled="true" with Filter lastSeenGeneration == N
+    Q->>SQS1: Stream current URLs in batches of 10 (stale/deleted URLs ignored)
+    
+    SQS1->>C: Trigger Crawler (Batch 1-5)
+    C->>CS: Verify host is enabled (cached 5 min)
+    C->>C: Verify every redirect hop via ScopedRedirectHandler (https + approved host)
+    C->>C: Check RFC 9309 RobotsRules (* and $ wildcards) & response size <= 5 MB
+    alt Content Changed / New
+        C->>S3R: Put raw/{YYYY-MM-DD}/{hash}.html
+        C->>C: Update status = CRAWLED
+    else Content Unchanged
+        C->>C: touch_unchanged (Skip S3 write)
+    else Blocked / Skipped
+        C->>C: record_skip(reason) (Preserve lifecycle status)
+    end
+    
+    S3R->>P: ObjectCreated via processing-queue
+    P->>P: TextExtractor (Strip nav, HTML tables -> Markdown)
+    P->>S3S: Put processed/{hash}.txt
+    P->>P: Mark status = PROCESSED in DynamoDB
+    P->>S3S: Put processed/{hash}.txt.metadata.json
+    
+    S3S->>U: ObjectCreated (.metadata.json) via curation-queue
+    alt Ready & Approved (Gates 1-4 pass)
+        U->>S3K: Copy .txt & .metadata.json as pair (cross-region fallback)
+        U->>U: Mark status = APPROVED
+    else In-Flight Status
+        U-->>U: Raise exception (SQS visibility retry)
+    end
+    
+    loop Every 10-15 Min
+        EB->>IT: Run quiescence check
+        IT->>IT: Check depths across 3 queues
+        alt 2 Consecutive 0-Depth Checks & Cooldown Passed
+            IT->>S3K: Reconcile deletions using lastDiscoveredGeneration (purge stale files)
+            IT->>B: StartIngestionJob (Bedrock KB Sync)
+        end
+    end
