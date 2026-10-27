@@ -1,0 +1,40 @@
+flowchart TD
+    subgraph INGESTION["1. Ingestion Pipeline (AWS Serverless)"]
+        direction TB
+        SOURCES[("DynamoDB crawl-sources<br/>(Approved hosts, aliases, candidate subdomains)")]
+        EB1["EventBridge Scheduler<br/>(Nightly Discovery Cron)"] --> L1["Discovery Lambda"]
+        SOURCES <--> L1
+        L1 -- "Async Invoke {'generation': N}" --> L2["Queueing Lambda"]
+        L2 --> Q1[("SQS crawl-queue")]
+        Q1 --> L3["Crawler Lambda"]
+        SOURCES -. Cached Host Check .-> L3
+        L3 --> S3_RAW[("S3 raw-bucket<br/>raw/YYYY-MM-DD/{hash}.html")]
+        S3_RAW -- S3 ObjectCreated --> Q2[("SQS processing-queue")]
+        Q2 --> L4["Processing Lambda"]
+        L4 --> S3_STAGE[("S3 staging-bucket<br/>processed/{hash}.txt<br/>{hash}.txt.metadata.json")]
+        S3_STAGE -- S3 ObjectCreated --> Q3[("SQS curation-queue")]
+        Q3 --> L5["Curation Lambda"]
+        L5 --> S3_KB[("S3 kb-source-bucket<br/>(Curated text + sidecars)")]
+        
+        EB2["EventBridge Scheduler<br/>(Every 10-15 Min)"] --> L6["Ingestion-Trigger Lambda"]
+        L6 -- Monitor Depths --> Q1 & Q2 & Q3
+        L6 -- Reconcile Deletions --> S3_KB
+        L6 -- StartIngestionJob --> BEDROCK_SYNC["Amazon Bedrock<br/>Data Source Sync Job"]
+    end
+
+    subgraph BEDROCK["2. Bedrock Knowledge Base & RAG Layer"]
+        direction TB
+        BEDROCK_SYNC --> AOSS[("OpenSearch Serverless<br/>Vector Store (1536-dim)")]
+        TITAN["Amazon Titan Embeddings V2<br/>(text-to-vector)"] <--> AOSS
+        GUARDRAILS["Bedrock Guardrails<br/>(PII Redaction & Prompt Injection Filter)"]
+    end
+
+    subgraph CONNECT["3. Contact Center Runtime (Amazon Connect)"]
+        direction TB
+        CUSTOMER(["Customer<br/>(Voice / Web Chat / Mobile)"]) <--> FLOW["Amazon Connect<br/>Contact Flow"]
+        FLOW <--> LEX["Amazon Lex V2 /<br/>Connect Speech Recognition"]
+        FLOW <--> RAG_CALL["Bedrock RetrieveAndGenerate API<br/>or Amazon Q in Connect"]
+        RAG_CALL <--> GUARDRAILS
+        RAG_CALL <--> AOSS
+        FLOW <--> AGENT(["Contact Center Agent<br/>(Connect Agent Workspace)"])
+    end

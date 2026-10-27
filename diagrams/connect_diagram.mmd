@@ -1,0 +1,25 @@
+flowchart LR
+    subgraph CHANNELS["Inbound Channels"]
+        VOICE["PSTN Voice Call"]
+        CHAT["Web Chat / Mobile App"]
+    end
+
+    subgraph CONNECT_CORE["Amazon Connect Contact Flow"]
+        ENTRY["Customer Inbound Entry"]
+        AUTH["Customer Verification / IVR"]
+        ROUTER{"Route to AI Agent?"}
+        AI_BLOCK["Amazon Q in Connect /<br/>Bedrock RetrieveAndGenerate"]
+        AGENT_QUEUE["Transfer to Human Agent Queue"]
+    end
+
+    subgraph BEDROCK_RAG["Bedrock Generative AI"]
+        KB["Bedrock Knowledge Base<br/>(Authoritative Bank Data)"]
+        FM["Claude 3.5 Sonnet / Haiku<br/>(Generative Response)"]
+        GUARD["Bedrock Guardrails<br/>(Grounding & Compliance)"]
+    end
+
+    VOICE & CHAT --> ENTRY --> AUTH --> ROUTER
+    ROUTER -- Yes --> AI_BLOCK
+    ROUTER -- No / Escalation --> AGENT_QUEUE
+    AI_BLOCK <--> KB & FM & GUARD
+    AI_BLOCK -- Unresolved / Low Confidence --> AGENT_QUEUE

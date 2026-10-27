@@ -38,7 +38,7 @@ flowchart TD
         SOURCES[("DynamoDB crawl-sources<br/>(Approved hosts, aliases, candidate subdomains)")]
         EB1["EventBridge Scheduler<br/>(Nightly Discovery Cron)"] --> L1["Discovery Lambda"]
         SOURCES <--> L1
-        L1 -- Async Invoke {"generation": N} --> L2["Queueing Lambda"]
+        L1 -- "Async Invoke {'generation': N}" --> L2["Queueing Lambda"]
         L2 --> Q1[("SQS crawl-queue")]
         Q1 --> L3["Crawler Lambda"]
         SOURCES -. Cached Host Check .-> L3
